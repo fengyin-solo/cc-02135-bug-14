@@ -546,6 +546,107 @@ h2 {
 }
 
 /* 分享列表 */
+.share-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+.share-select-all,
+.share-select {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    cursor: pointer;
+}
+
+.share-select-all input,
+.share-select input {
+    width: 16px;
+    height: 16px;
+    margin-right: 8px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.share-filters,
+.share-batch-actions {
+    display: inline-flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.share-filter-btn,
+.batch-action-btn,
+.restore-share-btn {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-primary);
+    border-radius: 999px;
+    padding: 8px 12px;
+    font-size: 0.8125rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.share-filter-btn span {
+    color: var(--text-secondary);
+    margin-left: 4px;
+}
+
+.share-filter-btn.active {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.batch-action-btn:disabled,
+.copy-link-btn:disabled,
+.delete-share-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.batch-action-btn.restore:hover:not(:disabled),
+.restore-share-btn:hover:not(:disabled) {
+    background: rgba(34, 197, 94, 0.15);
+    border-color: var(--success);
+    color: var(--success);
+}
+
+.batch-action-btn.disable:hover:not(:disabled) {
+    background: rgba(245, 158, 11, 0.15);
+    border-color: #f59e0b;
+    color: #f59e0b;
+}
+
+.batch-result-msg {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 0.875rem;
+}
+
+.batch-result-msg.success {
+    background: rgba(34, 197, 94, 0.12);
+    color: var(--success);
+    border: 1px solid rgba(34, 197, 94, 0.25);
+}
+
+.batch-result-msg.partial {
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
 .share-list {
     display: flex;
     flex-direction: column;
@@ -553,11 +654,23 @@ h2 {
 }
 
 .share-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid transparent;
     padding: 20px 24px;
     border-radius: 16px;
     transition: all 0.3s ease;
+}
+
+.share-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.share-item-disabled {
+    opacity: 0.68;
 }
 
 .share-item:hover {
@@ -629,7 +742,8 @@ h2 {
 }
 
 .copy-link-btn,
-.delete-share-btn {
+.delete-share-btn,
+.restore-share-btn {
     flex: 1;
     display: inline-flex;
     align-items: center;

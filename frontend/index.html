@@ -51,6 +51,22 @@
         <!-- 我的分享 -->
         <div id="mySharesSection" class="file-list-section" style="display: none;">
             <h2>我的分享</h2>
+            <div class="share-toolbar">
+                <label class="share-select-all">
+                    <input type="checkbox" id="selectAllShares">
+                    <span>全选</span>
+                </label>
+                <div class="share-filters">
+                    <button type="button" class="share-filter-btn active" data-filter="all">全部 <span id="shareCountAll">0</span></button>
+                    <button type="button" class="share-filter-btn" data-filter="active">有效 <span id="shareCountActive">0</span></button>
+                    <button type="button" class="share-filter-btn" data-filter="disabled">已停用 <span id="shareCountDisabled">0</span></button>
+                </div>
+                <div class="share-batch-actions">
+                    <button type="button" id="batchDisableBtn" class="batch-action-btn disable">批量停用</button>
+                    <button type="button" id="batchRestoreBtn" class="batch-action-btn restore">批量恢复</button>
+                </div>
+            </div>
+            <div id="shareBatchResult" class="batch-result-msg" hidden></div>
             <div id="mySharesList" class="share-list"></div>
         </div>
 

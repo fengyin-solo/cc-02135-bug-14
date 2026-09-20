@@ -5,7 +5,6 @@ import uuid
 import time
 import logging
 from flask import request, jsonify, send_file
-from werkzeug.utils import secure_filename
 from routes import files_bp
 from database import get_db
 from auth import verify_token, get_username_from_token, login_required
@@ -119,7 +118,8 @@ def get_share_link_info(share_id):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads, s.download_count, s.created_at,
+        SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads,
+               s.download_count, s.is_active, s.created_at,
                f.name as filename, f.size as filesize
         FROM share_links s
         JOIN files f ON s.file_id = f.id
@@ -135,6 +135,9 @@ def is_share_valid(share):
     if not share:
         return False, '分享链接不存在'
 
+    if not share['is_active']:
+        return False, '分享链接已停用'
+
     if share['expires_at'] is not None and share['expires_at'] < time.time():
         return False, '分享链接已过期'
 
@@ -145,15 +148,21 @@ def is_share_valid(share):
 
 
 def increment_download_count(share_id):
-    """增加下载次数"""
+    """原子增加下载次数，避免停用或达到上限后仍继续下载"""
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute(
-        'UPDATE share_links SET download_count = download_count + 1 WHERE id = ?',
-        (share_id,)
-    )
+    cursor.execute('''
+        UPDATE share_links
+        SET download_count = download_count + 1
+        WHERE id = ?
+          AND is_active = 1
+          AND (expires_at IS NULL OR expires_at > ?)
+          AND (max_downloads IS NULL OR download_count < max_downloads)
+    ''', (share_id, time.time()))
+    updated = cursor.rowcount > 0
     conn.commit()
     conn.close()
+    return updated
 
 
 def get_token_from_request():
@@ -162,6 +171,49 @@ def get_token_from_request():
     if auth_header.startswith('Bearer '):
         return auth_header[7:]
     return request.args.get('token')
+
+
+def serialize_share(share, include_state=False):
+    """序列化分享记录，状态字段与数据库记录保持一致"""
+    valid, error_msg = is_share_valid(share)
+    data = {
+        'share_id': share['id'],
+        'file_id': share['file_id'],
+        'filename': share['filename'],
+        'filesize': share['filesize'],
+        'created_by': share['created_by'],
+        'expires_at': share['expires_at'],
+        'max_downloads': share['max_downloads'],
+        'download_count': share['download_count'],
+        'created_at': share['created_at'],
+        'is_valid': valid,
+        'error_msg': error_msg
+    }
+    if include_state:
+        data['is_active'] = bool(share['is_active'])
+    return data
+
+
+def normalize_share_ids(raw_ids):
+    """校验并去重批量操作的分享 ID，保持调用方传入顺序"""
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return None, 'share_ids 必须是非空数组'
+
+    share_ids = []
+    seen = set()
+    for raw_id in raw_ids:
+        if not isinstance(raw_id, str):
+            return None, '分享ID必须是字符串'
+        share_id = raw_id.strip()
+        if not share_id:
+            return None, '分享ID不能为空'
+        if share_id not in seen:
+            share_ids.append(share_id)
+            seen.add(share_id)
+
+    if len(share_ids) > 200:
+        return None, '单次最多操作 200 条分享记录'
+    return share_ids, None
 
 
 @files_bp.route('/api/share', methods=['POST'])
@@ -211,8 +263,8 @@ def create_share():
     share_id = generate_short_id()
 
     cursor.execute('''
-        INSERT INTO share_links (id, file_id, created_by, expires_at, max_downloads)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO share_links (id, file_id, created_by, expires_at, max_downloads, is_active)
+        VALUES (?, ?, ?, ?, ?, 1)
     ''', (share_id, file_id, username, expires_at, max_downloads))
 
     conn.commit()
@@ -233,25 +285,15 @@ def create_share():
 def get_share(share_id):
     """获取分享链接信息（公开访问）"""
     share = get_share_link_info(share_id)
-    valid, error_msg = is_share_valid(share)
 
-    if not share:
+    if not share or not share['is_active']:
         return jsonify({'error': '分享链接不存在'}), 404
 
-    share_data = {
-        'share_id': share['id'],
-        'filename': share['filename'],
-        'filesize': share['filesize'],
-        'created_by': share['created_by'],
-        'expires_at': share['expires_at'],
-        'max_downloads': share['max_downloads'],
-        'download_count': share['download_count'],
-        'created_at': share['created_at'],
-        'is_valid': valid,
-        'error_msg': error_msg
-    }
+    valid, error_msg = is_share_valid(share)
+    if not valid:
+        return jsonify({'error': error_msg}), 404
 
-    return jsonify(share_data)
+    return jsonify(serialize_share(share))
 
 
 @files_bp.route('/api/share/<share_id>/download', methods=['GET'])
@@ -278,23 +320,25 @@ def download_by_share(share_id):
     if not os.path.exists(file_info['path']):
         return jsonify({'error': '文件不存在'}), 404
 
-    increment_download_count(share_id)
+    if not increment_download_count(share_id):
+        return jsonify({'error': '分享链接不存在或已失效'}), 404
 
-    logger.info(f"分享下载: 文件 {file_info['name']}, 分享ID {share_id}, 下载次数 {share['download_count'] + 1}")
+    logger.info(f"分享下载: 文件 {file_info['name']}, 分享ID {share_id}")
     return send_file(file_info['path'], as_attachment=True, download_name=file_info['name'])
 
 
 @files_bp.route('/api/shares', methods=['GET'])
 @login_required
 def list_shares():
-    """获取当前用户的所有分享链接"""
+    """获取当前用户的所有分享链接，包括已停用待恢复的记录"""
     token = get_token_from_request()
     username = get_username_from_token(token)
 
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads, s.download_count, s.created_at,
+        SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads,
+               s.download_count, s.is_active, s.created_at,
                f.name as filename, f.size as filesize
         FROM share_links s
         JOIN files f ON s.file_id = f.id
@@ -304,29 +348,119 @@ def list_shares():
     shares = cursor.fetchall()
     conn.close()
 
-    result = []
-    for share in shares:
-        valid, error_msg = is_share_valid(share)
-        result.append({
-            'share_id': share['id'],
-            'file_id': share['file_id'],
-            'filename': share['filename'],
-            'filesize': share['filesize'],
-            'expires_at': share['expires_at'],
-            'max_downloads': share['max_downloads'],
-            'download_count': share['download_count'],
-            'created_at': share['created_at'],
-            'is_valid': valid,
-            'error_msg': error_msg
-        })
+    return jsonify([serialize_share(share, include_state=True) for share in shares])
 
-    return jsonify(result)
+
+@files_bp.route('/api/shares/batch', methods=['POST'])
+@login_required
+def batch_update_shares():
+    """批量停用或恢复当前用户的分享链接，逐条做归属校验并逐条返回结果"""
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': '无效的请求数据'}), 400
+
+    action = data.get('action')
+    if action not in ('delete', 'restore'):
+        return jsonify({'error': "action 必须是 'delete' 或 'restore'"}), 400
+
+    share_ids, error = normalize_share_ids(data.get('share_ids'))
+    if error:
+        return jsonify({'error': error}), 400
+
+    token = get_token_from_request()
+    username = get_username_from_token(token)
+    target_active = 0 if action == 'delete' else 1
+    results = []
+
+    conn = get_db()
+    cursor = conn.cursor()
+    for share_id in share_ids:
+        try:
+            cursor.execute(
+                'SELECT id, created_by, is_active FROM share_links WHERE id = ?',
+                (share_id,)
+            )
+            share = cursor.fetchone()
+
+            if not share:
+                results.append({
+                    'share_id': share_id,
+                    'success': False,
+                    'status': 404,
+                    'message': '分享链接不存在'
+                })
+                continue
+
+            if share['created_by'] != username:
+                results.append({
+                    'share_id': share_id,
+                    'success': False,
+                    'status': 403,
+                    'message': '无权限操作此分享链接'
+                })
+                continue
+
+            if share['is_active'] == target_active:
+                message = '分享链接已停用' if action == 'delete' else '分享链接已恢复'
+                results.append({
+                    'share_id': share_id,
+                    'success': True,
+                    'status': 200,
+                    'message': message,
+                    'changed': False
+                })
+                continue
+
+            cursor.execute(
+                'UPDATE share_links SET is_active = ? WHERE id = ? AND created_by = ? AND is_active = ?',
+                (target_active, share_id, username, share['is_active'])
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                results.append({
+                    'share_id': share_id,
+                    'success': False,
+                    'status': 409,
+                    'message': '分享状态已变化，请刷新后重试'
+                })
+                continue
+
+            conn.commit()
+            message = '分享链接已停用' if action == 'delete' else '分享链接已恢复'
+            results.append({
+                'share_id': share_id,
+                'success': True,
+                'status': 200,
+                'message': message,
+                'changed': True
+            })
+        except Exception:
+            conn.rollback()
+            logger.exception('批量操作分享链接失败: %s', share_id)
+            results.append({
+                'share_id': share_id,
+                'success': False,
+                'status': 500,
+                'message': '操作失败，请稍后重试'
+            })
+    conn.close()
+
+    success_count = sum(1 for item in results if item['success'])
+    failed_count = len(results) - success_count
+    return jsonify({
+        'success': failed_count == 0,
+        'action': action,
+        'total': len(results),
+        'success_count': success_count,
+        'failed_count': failed_count,
+        'results': results
+    })
 
 
 @files_bp.route('/api/share/<share_id>', methods=['DELETE'])
 @login_required
 def delete_share(share_id):
-    """删除分享链接"""
+    """删除分享链接（保留既有本人单条分享流程）"""
     token = get_token_from_request()
     username = get_username_from_token(token)
 

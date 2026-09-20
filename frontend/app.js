@@ -3,6 +3,10 @@ const API_BASE = CONFIG.API_BASE;
 
 let currentShareFileId = null;
 let currentShareLink = null;
+let myShares = [];
+let selectedShareIds = new Set();
+let shareFilter = 'all';
+let shareLoadSerial = 0;
 
 // Token 管理
 const TokenManager = {
@@ -59,6 +63,9 @@ async function updateUserBar() {
         const shareSection = document.getElementById('mySharesSection');
         if (shareSection) {
             shareSection.style.display = 'none';
+            myShares = [];
+            selectedShareIds.clear();
+            hideBatchResult();
         }
     }
 }
@@ -511,71 +518,257 @@ async function copyShareLink() {
 async function loadMyShares() {
     const section = document.getElementById('mySharesSection');
     const list = document.getElementById('mySharesList');
-    
+
     if (!(await TokenManager.isValid())) {
         section.style.display = 'none';
         return;
     }
-    
+
     section.style.display = 'block';
-    
+    const requestSerial = ++shareLoadSerial;
+
     try {
         const response = await fetch(`${API_BASE}/shares`, {
             headers: {
                 'Authorization': `Bearer ${TokenManager.get()}`
             }
         });
-        
-        const shares = await response.json();
-        
-        if (shares.length === 0) {
-            list.innerHTML = '<p class="empty-msg">暂无分享链接</p>';
-            return;
+
+        if (!response.ok) {
+            throw new Error((await response.json()).error || '加载失败');
         }
-        
-        list.innerHTML = shares.map(share => {
-            const statusClass = share.is_valid ? 'valid' : 'invalid';
-            const statusText = share.is_valid ? '有效' : (share.error_msg || '无效');
-            
+
+        const shares = await response.json();
+        if (requestSerial !== shareLoadSerial) return;
+
+        myShares = shares;
+        selectedShareIds = new Set([...selectedShareIds].filter(id => myShares.some(share => share.share_id === id)));
+        renderMyShares();
+    } catch (error) {
+        if (requestSerial === shareLoadSerial) {
+            myShares = [];
+            selectedShareIds.clear();
+            list.innerHTML = `<p class="empty-msg">加载失败: ${escapeHtml(error.message)}</p>`;
+            updateShareToolbar();
+        }
+    }
+}
+
+function getShareById(shareId) {
+    return myShares.find(share => share.share_id === shareId);
+}
+
+function getVisibleShares() {
+    if (shareFilter === 'active') {
+        return myShares.filter(share => share.is_active);
+    }
+    if (shareFilter === 'disabled') {
+        return myShares.filter(share => !share.is_active);
+    }
+    return myShares;
+}
+
+function getShareStatus(share) {
+    if (!share.is_active) {
+        return { className: 'invalid', text: '已停用' };
+    }
+    return {
+        className: share.is_valid ? 'valid' : 'invalid',
+        text: share.is_valid ? '有效' : (share.error_msg || '无效')
+    };
+}
+
+function renderMyShares() {
+    const list = document.getElementById('mySharesList');
+    const visibleShares = getVisibleShares();
+
+    if (myShares.length === 0) {
+        list.innerHTML = '<p class="empty-msg">暂无分享链接</p>';
+    } else if (visibleShares.length === 0) {
+        list.innerHTML = '<p class="empty-msg">当前筛选条件下暂无分享链接</p>';
+    } else {
+        list.innerHTML = visibleShares.map(share => {
+            const status = getShareStatus(share);
+            const checked = selectedShareIds.has(share.share_id) ? 'checked' : '';
+            const disabled = share.is_active ? '' : 'disabled';
+            const copyClass = share.is_active ? 'copy-link-btn' : 'copy-link-btn disabled-btn';
+
             return `
-                <div class="share-item">
-                    <div class="share-item-header">
-                        <span class="share-item-filename">${escapeHtml(share.filename)}</span>
-                        <span class="share-item-status ${statusClass}">${statusText}</span>
-                    </div>
-                    <div class="share-item-details">
-                        <div class="share-item-detail">
-                            <span class="share-item-detail-label">剩余时间</span>
-                            <span class="share-item-detail-value">${formatRemainingTime(share.expires_at)}</span>
+                <div class="share-item ${share.is_active ? '' : 'share-item-disabled'}">
+                    <label class="share-select">
+                        <input type="checkbox" class="share-checkbox" data-share-id="${escapeHtml(share.share_id)}" ${checked}>
+                    </label>
+                    <div class="share-main">
+                        <div class="share-item-header">
+                            <span class="share-item-filename">${escapeHtml(share.filename)}</span>
+                            <span class="share-item-status ${status.className}">${status.text}</span>
                         </div>
-                        <div class="share-item-detail">
-                            <span class="share-item-detail-label">已下载</span>
-                            <span class="share-item-detail-value">${share.download_count} / ${share.max_downloads || '∞'}</span>
+                        <div class="share-item-details">
+                            <div class="share-item-detail">
+                                <span class="share-item-detail-label">剩余时间</span>
+                                <span class="share-item-detail-value">${formatRemainingTime(share.expires_at)}</span>
+                            </div>
+                            <div class="share-item-detail">
+                                <span class="share-item-detail-label">已下载</span>
+                                <span class="share-item-detail-value">${share.download_count} / ${share.max_downloads || '∞'}</span>
+                            </div>
+                            <div class="share-item-detail">
+                                <span class="share-item-detail-label">创建时间</span>
+                                <span class="share-item-detail-value">${new Date(share.created_at).toLocaleString('zh-CN')}</span>
+                            </div>
                         </div>
-                        <div class="share-item-detail">
-                            <span class="share-item-detail-label">创建时间</span>
-                            <span class="share-item-detail-value">${new Date(share.created_at).toLocaleString('zh-CN')}</span>
+                        <div class="share-item-actions">
+                            <button class="${copyClass}" onclick="copyShareLinkFromList('${escapeHtml(share.share_id)}')" ${disabled}>
+                                🔗 复制链接
+                            </button>
+                            <button class="restore-share-btn" onclick="restoreSingleShare('${escapeHtml(share.share_id)}')" ${share.is_active ? 'hidden' : ''}>
+                                ↩️ 恢复
+                            </button>
+                            <button class="delete-share-btn" onclick="deleteShare('${escapeHtml(share.share_id)}')" ${share.is_active ? '' : 'disabled'}>
+                                🗑️ 永久删除
+                            </button>
                         </div>
-                    </div>
-                    <div class="share-item-actions">
-                        <button class="copy-link-btn" onclick="copyShareLinkFromList('${share.share_id}')">
-                            🔗 复制链接
-                        </button>
-                        <button class="delete-share-btn" onclick="deleteShare('${share.share_id}')">
-                            🗑️ 删除
-                        </button>
                     </div>
                 </div>
             `;
         }).join('');
+    }
+
+    updateShareToolbar();
+}
+
+function updateShareToolbar() {
+    const activeShares = myShares.filter(share => share.is_active);
+    const disabledShares = myShares.filter(share => !share.is_active);
+    const visibleShares = getVisibleShares();
+    const visibleIds = visibleShares.map(share => share.share_id);
+    const visibleSelectedIds = visibleIds.filter(id => selectedShareIds.has(id));
+
+    document.getElementById('shareCountAll').textContent = myShares.length;
+    document.getElementById('shareCountActive').textContent = activeShares.length;
+    document.getElementById('shareCountDisabled').textContent = disabledShares.length;
+
+    const selectAll = document.getElementById('selectAllShares');
+    selectAll.checked = visibleIds.length > 0 && visibleSelectedIds.length === visibleIds.length;
+    selectAll.indeterminate = visibleSelectedIds.length > 0 && visibleSelectedIds.length < visibleIds.length;
+    selectAll.disabled = visibleIds.length === 0;
+
+    const selectedShares = myShares.filter(share => selectedShareIds.has(share.share_id));
+    const hasActiveSelection = selectedShares.some(share => share.is_active);
+    const hasDisabledSelection = selectedShares.some(share => !share.is_active);
+    document.getElementById('batchDisableBtn').disabled = !hasActiveSelection;
+    document.getElementById('batchRestoreBtn').disabled = !hasDisabledSelection;
+
+    document.querySelectorAll('.share-filter-btn').forEach(button => {
+        button.classList.toggle('active', button.dataset.filter === shareFilter);
+    });
+}
+
+function toggleShareSelection(shareId, checked) {
+    if (checked) {
+        selectedShareIds.add(shareId);
+    } else {
+        selectedShareIds.delete(shareId);
+    }
+    updateShareToolbar();
+}
+
+function selectAllVisibleShares(checked) {
+    const visibleIds = getVisibleShares().map(share => share.share_id);
+    if (checked) {
+        visibleIds.forEach(id => selectedShareIds.add(id));
+    } else {
+        visibleIds.forEach(id => selectedShareIds.delete(id));
+    }
+    renderMyShares();
+}
+
+function setShareFilter(filter) {
+    shareFilter = filter;
+    renderMyShares();
+}
+
+function hideBatchResult() {
+    const resultBox = document.getElementById('shareBatchResult');
+    if (resultBox) {
+        resultBox.hidden = true;
+        resultBox.textContent = '';
+        resultBox.className = 'batch-result-msg';
+    }
+}
+
+function showBatchResult(result) {
+    const resultBox = document.getElementById('shareBatchResult');
+    const failures = result.results.filter(item => !item.success);
+    const failureText = failures.map(item => `${item.share_id}: ${item.message}`).join('；');
+    const listText = `管理页当前共 ${myShares.length} 条分享记录`;
+
+    if (failures.length > 0) {
+        resultBox.textContent =
+            `提交 ${result.total} 条，成功 ${result.success_count} 条，失败 ${result.failed_count} 条。${listText}。失败项：${failureText}`;
+        resultBox.className = 'batch-result-msg partial';
+    } else {
+        resultBox.textContent =
+            `提交 ${result.total} 条，成功 ${result.success_count} 条，失败 0 条。${listText}。`;
+        resultBox.className = 'batch-result-msg success';
+    }
+    resultBox.hidden = false;
+}
+
+async function submitShareBatch(action) {
+    const shareIds = [...selectedShareIds];
+    if (shareIds.length === 0) return;
+
+    const actionText = action === 'delete' ? '停用' : '恢复';
+    if (!confirm(`确定要${actionText}选中的 ${shareIds.length} 条分享记录吗？`)) {
+        return;
+    }
+
+    hideBatchResult();
+    showLoading(`批量${actionText}中...`);
+    let batchResult = null;
+
+    try {
+        const response = await fetch(`${API_BASE}/shares/batch`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${TokenManager.get()}`
+            },
+            body: JSON.stringify({ action, share_ids: shareIds })
+        });
+
+        batchResult = await response.json();
+        if (!response.ok) {
+            throw new Error(batchResult.error || `批量${actionText}失败`);
+        }
+
+        selectedShareIds = new Set(
+            batchResult.results.filter(item => !item.success).map(item => item.share_id)
+        );
     } catch (error) {
-        list.innerHTML = `<p class="empty-msg">加载失败: ${escapeHtml(error.message)}</p>`;
+        const resultBox = document.getElementById('shareBatchResult');
+        resultBox.textContent = `批量${actionText}失败: ${error.message}`;
+        resultBox.className = 'batch-result-msg partial';
+        resultBox.hidden = false;
+    } finally {
+        hideLoading();
+        await loadMyShares();
+        if (batchResult) {
+            showBatchResult(batchResult);
+        }
     }
 }
 
 // 从分享列表复制链接
 async function copyShareLinkFromList(shareId) {
-    const link = `${window.location.origin}/share.html#${shareId}`;
+    const share = getShareById(shareId);
+    if (!share || !share.is_active || !share.is_valid) {
+        alert('该分享链接已停用或已失效，无法复制');
+        return;
+    }
+
+    const link = `${window.location.origin}/share.html#${encodeURIComponent(share.share_id)}`;
     try {
         await navigator.clipboard.writeText(link);
         alert('分享链接已复制到剪贴板');
@@ -584,14 +777,56 @@ async function copyShareLinkFromList(shareId) {
     }
 }
 
-// 删除分享链接
-async function deleteShare(shareId) {
-    if (!confirm('确定要删除此分享链接吗？删除后链接将立即失效。')) {
+async function restoreSingleShare(shareId) {
+    const share = getShareById(shareId);
+    if (!share || share.is_active) return;
+
+    if (!confirm('确定要恢复此分享链接吗？恢复后有效链接将重新可访问。')) {
         return;
     }
-    
+
+    hideBatchResult();
+    showLoading('恢复中...');
+    try {
+        const response = await fetch(`${API_BASE}/shares/batch`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${TokenManager.get()}`
+            },
+            body: JSON.stringify({ action: 'restore', share_ids: [shareId] })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || '恢复失败');
+        }
+        const item = result.results[0];
+        if (!item.success) {
+            alert(`恢复失败: ${item.message}`);
+        }
+    } catch (error) {
+        alert(`恢复失败: ${error.message}`);
+    } finally {
+        hideLoading();
+        await loadMyShares();
+    }
+}
+
+// 永久删除单条分享链接
+async function deleteShare(shareId) {
+    const share = getShareById(shareId);
+    if (!share || !share.is_active) {
+        alert('已停用记录请先恢复后再永久删除');
+        return;
+    }
+
+    if (!confirm('确定要永久删除此分享链接吗？删除后链接将立即失效且无法恢复。')) {
+        return;
+    }
+
+    hideBatchResult();
     showLoading('删除中...');
-    
+
     try {
         const response = await fetch(`${API_BASE}/share/${shareId}`, {
             method: 'DELETE',
@@ -599,9 +834,10 @@ async function deleteShare(shareId) {
                 'Authorization': `Bearer ${TokenManager.get()}`
             }
         });
-        
+
         if (response.ok) {
-            loadMyShares();
+            selectedShareIds.delete(shareId);
+            await loadMyShares();
         } else {
             const result = await response.json();
             alert(`删除失败: ${result.error || '未知错误'}`);
@@ -613,4 +849,22 @@ async function deleteShare(shareId) {
     }
 }
 
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('selectAllShares').addEventListener('change', event => {
+        selectAllVisibleShares(event.target.checked);
+    });
+
+    document.getElementById('mySharesList').addEventListener('change', event => {
+        if (event.target.classList.contains('share-checkbox')) {
+            toggleShareSelection(event.target.dataset.shareId, event.target.checked);
+        }
+    });
+
+    document.querySelectorAll('.share-filter-btn').forEach(button => {
+        button.addEventListener('click', () => setShareFilter(button.dataset.filter));
+    });
+
+    document.getElementById('batchDisableBtn').addEventListener('click', () => submitShareBatch('delete'));
+    document.getElementById('batchRestoreBtn').addEventListener('click', () => submitShareBatch('restore'));
+});
 

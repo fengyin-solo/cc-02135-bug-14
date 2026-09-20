@@ -51,10 +51,27 @@ def init_db():
             expires_at REAL,
             max_downloads INTEGER,
             download_count INTEGER DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
         )
     ''')
+
+    # 兼容旧数据库：批量停用/恢复使用 is_active 表示分享记录状态。
+    columns = [
+        row[1]
+        for row in cursor.execute("PRAGMA table_info(share_links)").fetchall()
+    ]
+    if 'is_active' not in columns:
+        cursor.execute('ALTER TABLE share_links ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1')
+
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_share_owner_active '
+        'ON share_links(created_by, is_active, created_at DESC)'
+    )
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_share_active ON share_links(is_active)'
+    )
 
     default_users = [
         ('admin', hashlib.sha256('admin123'.encode()).hexdigest()),
