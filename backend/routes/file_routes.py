@@ -119,7 +119,8 @@ def get_share_link_info(share_id):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads, s.download_count, s.created_at,
+        SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads,
+               s.download_count, s.is_disabled, s.created_at,
                f.name as filename, f.size as filesize
         FROM share_links s
         JOIN files f ON s.file_id = f.id
@@ -135,6 +136,9 @@ def is_share_valid(share):
     if not share:
         return False, '分享链接不存在'
 
+    if share['is_disabled']:
+        return False, '分享链接已停用'
+
     if share['expires_at'] is not None and share['expires_at'] < time.time():
         return False, '分享链接已过期'
 
@@ -142,6 +146,26 @@ def is_share_valid(share):
         return False, '分享链接下载次数已用完'
 
     return True, None
+
+
+def get_owned_share(cursor, share_id, username):
+    """逐条归属判断：返回 (share_row, error_response)。
+
+    - 分享不存在 -> (None, (jsonify({'error': '分享链接不存在'}), 404))
+    - 归属他人 -> (None, (jsonify({'error': '无权限操作此分享链接'}), 403))，
+      且调用方不得对该记录做任何改动
+    - 归属本人 -> (share_row, None)
+    """
+    cursor.execute(
+        'SELECT id, created_by, file_id, is_disabled FROM share_links WHERE id = ?',
+        (share_id,)
+    )
+    share = cursor.fetchone()
+    if not share:
+        return None, (jsonify({'error': '分享链接不存在'}), 404)
+    if share['created_by'] != username:
+        return None, (jsonify({'error': '无权限操作此分享链接'}), 403)
+    return share, None
 
 
 def increment_download_count(share_id):
@@ -233,10 +257,15 @@ def create_share():
 def get_share(share_id):
     """获取分享链接信息（公开访问）"""
     share = get_share_link_info(share_id)
-    valid, error_msg = is_share_valid(share)
 
     if not share:
         return jsonify({'error': '分享链接不存在'}), 404
+
+    # 已被所有者停用的分享不得出现在公开访问路径，对外表现为不存在
+    if share['is_disabled']:
+        return jsonify({'error': '分享链接不存在'}), 404
+
+    valid, error_msg = is_share_valid(share)
 
     share_data = {
         'share_id': share['id'],
@@ -246,6 +275,7 @@ def get_share(share_id):
         'expires_at': share['expires_at'],
         'max_downloads': share['max_downloads'],
         'download_count': share['download_count'],
+        'is_disabled': bool(share['is_disabled']),
         'created_at': share['created_at'],
         'is_valid': valid,
         'error_msg': error_msg
@@ -294,7 +324,8 @@ def list_shares():
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads, s.download_count, s.created_at,
+        SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads,
+               s.download_count, s.is_disabled, s.created_at,
                f.name as filename, f.size as filesize
         FROM share_links s
         JOIN files f ON s.file_id = f.id
@@ -307,6 +338,12 @@ def list_shares():
     result = []
     for share in shares:
         valid, error_msg = is_share_valid(share)
+        if share['is_disabled']:
+            status = 'disabled'
+        elif not valid:
+            status = 'expired'
+        else:
+            status = 'active'
         result.append({
             'share_id': share['id'],
             'file_id': share['file_id'],
@@ -315,6 +352,8 @@ def list_shares():
             'expires_at': share['expires_at'],
             'max_downloads': share['max_downloads'],
             'download_count': share['download_count'],
+            'is_disabled': bool(share['is_disabled']),
+            'status': status,
             'created_at': share['created_at'],
             'is_valid': valid,
             'error_msg': error_msg
@@ -326,22 +365,16 @@ def list_shares():
 @files_bp.route('/api/share/<share_id>', methods=['DELETE'])
 @login_required
 def delete_share(share_id):
-    """删除分享链接"""
+    """删除分享链接（本人单条流程，行为保持不变）"""
     token = get_token_from_request()
     username = get_username_from_token(token)
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT created_by, file_id FROM share_links WHERE id = ?', (share_id,))
-    share = cursor.fetchone()
-
-    if not share:
+    share, error = get_owned_share(cursor, share_id, username)
+    if error:
         conn.close()
-        return jsonify({'error': '分享链接不存在'}), 404
-
-    if share['created_by'] != username:
-        conn.close()
-        return jsonify({'error': '无权限删除此分享链接'}), 403
+        return error
 
     cursor.execute('DELETE FROM share_links WHERE id = ?', (share_id,))
     conn.commit()
@@ -349,3 +382,153 @@ def delete_share(share_id):
 
     logger.info(f"分享链接删除: 分享ID {share_id}, 文件ID {share['file_id']}, 操作者 {username}")
     return jsonify({'success': True, 'message': '分享链接已删除'})
+
+
+@files_bp.route('/api/share/<share_id>/disable', methods=['POST'])
+@login_required
+def disable_share(share_id):
+    """停用分享链接（本人单条）"""
+    token = get_token_from_request()
+    username = get_username_from_token(token)
+
+    conn = get_db()
+    cursor = conn.cursor()
+    share, error = get_owned_share(cursor, share_id, username)
+    if error:
+        conn.close()
+        return error
+
+    cursor.execute('UPDATE share_links SET is_disabled = 1 WHERE id = ?', (share_id,))
+    conn.commit()
+    conn.close()
+
+    logger.info(f"分享链接停用: 分享ID {share_id}, 操作者 {username}")
+    return jsonify({'success': True, 'share_id': share_id, 'is_disabled': True})
+
+
+@files_bp.route('/api/share/<share_id>/restore', methods=['POST'])
+@login_required
+def restore_share(share_id):
+    """恢复（取消停用）分享链接（本人单条）"""
+    token = get_token_from_request()
+    username = get_username_from_token(token)
+
+    conn = get_db()
+    cursor = conn.cursor()
+    share, error = get_owned_share(cursor, share_id, username)
+    if error:
+        conn.close()
+        return error
+
+    cursor.execute('UPDATE share_links SET is_disabled = 0 WHERE id = ?', (share_id,))
+    conn.commit()
+    conn.close()
+
+    logger.info(f"分享链接恢复: 分享ID {share_id}, 操作者 {username}")
+    return jsonify({'success': True, 'share_id': share_id, 'is_disabled': False})
+
+
+BATCH_ACTIONS = ('delete', 'disable', 'restore')
+
+
+@files_bp.route('/api/shares/batch', methods=['POST'])
+@login_required
+def batch_operate_shares():
+    """批量删除/停用/恢复分享链接。
+
+    逐条归属判断：无权限或不存在的项逐条拒绝（403/404），绝不改动；
+    其余项逐条执行。返回 total/succeeded/failed 与每个 share_id 的结果，
+    三者数量始终与去重后的提交项总数一致。
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': '无效的请求数据'}), 400
+
+    action = data.get('action')
+    share_ids = data.get('share_ids')
+
+    if action not in BATCH_ACTIONS:
+        return jsonify({'error': '不支持的批量操作'}), 400
+
+    if not isinstance(share_ids, list) or not share_ids:
+        return jsonify({'error': '请至少选择一条分享记录'}), 400
+
+    # 校验并按提交顺序去重：任何非字符串/空白 ID 都属于非法请求，整体拒绝，
+    # 保证返回的 total 与实际处理项严格一致
+    unique_ids = []
+    seen = set()
+    for raw_id in share_ids:
+        if not isinstance(raw_id, str):
+            return jsonify({'error': '分享ID格式无效'}), 400
+        sid = raw_id.strip()
+        if not sid:
+            return jsonify({'error': '分享ID不能为空'}), 400
+        if sid not in seen:
+            seen.add(sid)
+            unique_ids.append(sid)
+
+    if len(unique_ids) > 100:
+        return jsonify({'error': '单次最多操作 100 条分享记录'}), 400
+
+    token = get_token_from_request()
+    username = get_username_from_token(token)
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    results = []
+    succeeded = 0
+    failed = 0
+
+    for sid in unique_ids:
+        # 每个 share_id 都独立查询并做归属判断，不能用一次批量 UPDATE 绕过
+        share, error = get_owned_share(cursor, sid, username)
+        if error:
+            response, status_code = error
+            results.append({
+                'share_id': sid,
+                'success': False,
+                'code': status_code,
+                'error': response.get_json()['error']
+            })
+            failed += 1
+            continue
+
+        try:
+            if action == 'delete':
+                cursor.execute('DELETE FROM share_links WHERE id = ?', (sid,))
+            elif action == 'disable':
+                cursor.execute('UPDATE share_links SET is_disabled = 1 WHERE id = ?', (sid,))
+            else:  # restore
+                cursor.execute('UPDATE share_links SET is_disabled = 0 WHERE id = ?', (sid,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.exception(f'批量{action}分享失败: 分享ID {sid}, 操作者 {username}')
+            results.append({
+                'share_id': sid,
+                'success': False,
+                'code': 500,
+                'error': '操作失败'
+            })
+            failed += 1
+            continue
+
+        results.append({'share_id': sid, 'success': True, 'code': 200})
+        succeeded += 1
+
+    conn.close()
+
+    logger.info(
+        f'批量{action}分享: 操作者 {username}, 总数 {len(unique_ids)}, '
+        f'成功 {succeeded}, 失败 {failed}'
+    )
+
+    return jsonify({
+        'success': True,
+        'action': action,
+        'total': len(unique_ids),
+        'succeeded': succeeded,
+        'failed': failed,
+        'results': results
+    })

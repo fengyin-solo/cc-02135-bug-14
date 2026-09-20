@@ -459,7 +459,7 @@ async function confirmCreateShare() {
 
 // 显示分享成功弹窗
 function showShareSuccessModal(result) {
-    currentShareLink = `${window.location.origin}/share.html#${result.share_id}`;
+    currentShareLink = buildShareLink(result.share_id);
     
     document.getElementById('shareLinkInput').value = currentShareLink;
     document.getElementById('shareInfoName').textContent = result.filename;
@@ -507,39 +507,74 @@ async function copyShareLink() {
     }
 }
 
+// 管理页分享选择状态（唯一事实来源，避免依赖全局变量导致串对象）
+const selectedShareIds = new Set();
+
+// 构造分享链接（统一入口，保证链接与传入的 shareId 一一对应）
+function buildShareLink(shareId) {
+    return `${window.location.origin}/share.html#${shareId}`;
+}
+
 // 加载我的分享列表
 async function loadMyShares() {
     const section = document.getElementById('mySharesSection');
     const list = document.getElementById('mySharesList');
-    
+
     if (!(await TokenManager.isValid())) {
         section.style.display = 'none';
+        selectedShareIds.clear();
+        updateBatchBar([]);
         return;
     }
-    
+
     section.style.display = 'block';
-    
+
     try {
         const response = await fetch(`${API_BASE}/shares`, {
             headers: {
                 'Authorization': `Bearer ${TokenManager.get()}`
             }
         });
-        
-        const shares = await response.json();
-        
-        if (shares.length === 0) {
-            list.innerHTML = '<p class="empty-msg">暂无分享链接</p>';
+
+        if (!response.ok) {
+            list.innerHTML = '<p class="empty-msg">分享列表加载失败</p>';
+            updateBatchBar([]);
             return;
         }
-        
+
+        const shares = await response.json();
+
+        // 以服务端列表为准，剔除已不存在的勾选项，保证选择集合与列表对得上
+        for (const id of [...selectedShareIds]) {
+            if (!shares.some(share => share.share_id === id)) {
+                selectedShareIds.delete(id);
+            }
+        }
+
+        if (shares.length === 0) {
+            list.innerHTML = '<p class="empty-msg">暂无分享链接</p>';
+            updateBatchBar([]);
+            return;
+        }
+
         list.innerHTML = shares.map(share => {
-            const statusClass = share.is_valid ? 'valid' : 'invalid';
-            const statusText = share.is_valid ? '有效' : (share.error_msg || '无效');
-            
+            const isChecked = selectedShareIds.has(share.share_id);
+            const disabled = share.status === 'disabled';
+            const statusClass = disabled ? 'invalid' : (share.is_valid ? 'valid' : 'invalid');
+            const statusText = disabled
+                ? '已停用'
+                : (share.is_valid ? '有效' : (share.error_msg || '已失效'));
+            const actionButton = disabled
+                ? `<button class="restore-share-btn" onclick="restoreSingleShare('${share.share_id}')">♻️ 恢复</button>`
+                : `<button class="disable-share-btn" onclick="disableSingleShare('${share.share_id}')">⏸️ 停用</button>`;
+
             return `
-                <div class="share-item">
+                <div class="share-item${disabled ? ' share-item-disabled' : ''}">
                     <div class="share-item-header">
+                        <label class="share-select">
+                            <input type="checkbox" data-share-id="${share.share_id}"
+                                   ${isChecked ? 'checked' : ''}>
+                        </label>
                         <span class="share-item-filename">${escapeHtml(share.filename)}</span>
                         <span class="share-item-status ${statusClass}">${statusText}</span>
                     </div>
@@ -561,6 +596,7 @@ async function loadMyShares() {
                         <button class="copy-link-btn" onclick="copyShareLinkFromList('${share.share_id}')">
                             🔗 复制链接
                         </button>
+                        ${actionButton}
                         <button class="delete-share-btn" onclick="deleteShare('${share.share_id}')">
                             🗑️ 删除
                         </button>
@@ -568,14 +604,129 @@ async function loadMyShares() {
                 </div>
             `;
         }).join('');
+
+        updateBatchBar(shares);
     } catch (error) {
         list.innerHTML = `<p class="empty-msg">加载失败: ${escapeHtml(error.message)}</p>`;
+        updateBatchBar([]);
     }
 }
 
-// 从分享列表复制链接
+// 更新批量操作工具栏状态
+function updateBatchBar(shares) {
+    const bar = document.getElementById('shareBatchBar');
+    if (!shares.length) {
+        bar.hidden = true;
+        return;
+    }
+    bar.hidden = false;
+    document.getElementById('selectedCount').textContent = `已选 ${selectedShareIds.size} 项`;
+
+    const selectAll = document.getElementById('selectAllShares');
+    selectAll.checked = shares.length > 0 && shares.every(share => selectedShareIds.has(share.share_id));
+    selectAll.indeterminate = selectedShareIds.size > 0 && !selectAll.checked;
+}
+
+// 列表内复选框（事件委托，勾选状态只认 data-share-id）
+document.getElementById('mySharesList').addEventListener('change', (e) => {
+    const checkbox = e.target.closest('input[type="checkbox"][data-share-id]');
+    if (!checkbox) return;
+    const shareId = checkbox.dataset.shareId;
+    if (checkbox.checked) {
+        selectedShareIds.add(shareId);
+    } else {
+        selectedShareIds.delete(shareId);
+    }
+    const shares = document.querySelectorAll('#mySharesList input[data-share-id]');
+    document.getElementById('selectedCount').textContent = `已选 ${selectedShareIds.size} 项`;
+    const selectAll = document.getElementById('selectAllShares');
+    selectAll.checked = shares.length > 0 && [...shares].every(item => item.checked);
+    selectAll.indeterminate = selectedShareIds.size > 0 && !selectAll.checked;
+});
+
+// 全选 / 取消全选（以当前列表为准）
+document.getElementById('selectAllShares').addEventListener('change', (e) => {
+    const checkboxes = document.querySelectorAll('#mySharesList input[data-share-id]');
+    checkboxes.forEach(checkbox => {
+        checkbox.checked = e.target.checked;
+        const shareId = checkbox.dataset.shareId;
+        if (e.target.checked) {
+            selectedShareIds.add(shareId);
+        } else {
+            selectedShareIds.delete(shareId);
+        }
+    });
+    document.getElementById('selectedCount').textContent = `已选 ${selectedShareIds.size} 项`;
+});
+
+// 回显批量操作结果：总数与成功/失败之和一致，逐条列出被拒绝项
+function showBatchResult(action, data) {
+    const box = document.getElementById('batchResult');
+    const actionText = { delete: '删除', disable: '停用', restore: '恢复' }[action];
+    const failures = data.results.filter(item => !item.success);
+
+    let html = `✅ 批量${actionText}完成：共 ${data.total} 项，成功 ${data.succeeded} 项，失败 ${data.failed} 项`;
+    if (failures.length) {
+        const detail = failures
+            .map(item => `• ${escapeHtml(item.share_id)}：${escapeHtml(item.error)}`)
+            .join('<br>');
+        html += `<div class="batch-result-detail">以下记录未改动：<br>${detail}</div>`;
+    }
+    box.innerHTML = html;
+    box.className = 'batch-result ' + (failures.length ? 'batch-result-warn' : 'batch-result-ok');
+    box.hidden = false;
+}
+
+// 提交批量操作：逐条归属判断由后端完成，前端只回显真实结果并重新加载列表
+async function batchOperate(action) {
+    const ids = [...selectedShareIds];
+    if (!ids.length) {
+        alert('请先勾选要操作的分享记录');
+        return;
+    }
+
+    const actionText = { delete: '删除', disable: '停用', restore: '恢复' }[action];
+    if (action === 'delete' &&
+        !confirm(`确定要批量${actionText}选中的 ${ids.length} 条分享链接吗？删除后链接将立即失效。`)) {
+        return;
+    }
+
+    showLoading(`批量${actionText}中...`);
+
+    try {
+        const response = await fetch(`${API_BASE}/shares/batch`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${TokenManager.get()}`
+            },
+            body: JSON.stringify({ action, share_ids: ids })
+        });
+        const result = await response.json();
+
+        if (!response.ok) {
+            alert(`批量${actionText}失败: ${result.error || '未知错误'}`);
+            return;
+        }
+
+        // 返回管理页面：清空选择，以重新加载的服务端列表作为唯一事实来源
+        selectedShareIds.clear();
+        showBatchResult(action, result);
+        await loadMyShares();
+    } catch (error) {
+        alert(`批量${actionText}失败: ${error.message}`);
+    } finally {
+        hideLoading();
+    }
+}
+
+document.getElementById('batchDeleteBtn').addEventListener('click', () => batchOperate('delete'));
+document.getElementById('batchDisableBtn').addEventListener('click', () => batchOperate('disable'));
+document.getElementById('batchRestoreBtn').addEventListener('click', () => batchOperate('restore'));
+
+// 从分享列表复制链接（直接使用本条记录的 ID，不读取任何全局共享状态）
 async function copyShareLinkFromList(shareId) {
-    const link = `${window.location.origin}/share.html#${shareId}`;
+    const link = buildShareLink(shareId);
     try {
         await navigator.clipboard.writeText(link);
         alert('分享链接已复制到剪贴板');
@@ -584,14 +735,56 @@ async function copyShareLinkFromList(shareId) {
     }
 }
 
-// 删除分享链接
+// 单条停用
+async function disableSingleShare(shareId) {
+    showLoading('停用中...');
+    try {
+        const response = await fetch(`${API_BASE}/share/${shareId}/disable`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${TokenManager.get()}` }
+        });
+        if (!response.ok) {
+            const result = await response.json();
+            alert(`停用失败: ${result.error || '未知错误'}`);
+            return;
+        }
+        await loadMyShares();
+    } catch (error) {
+        alert(`停用失败: ${error.message}`);
+    } finally {
+        hideLoading();
+    }
+}
+
+// 单条恢复
+async function restoreSingleShare(shareId) {
+    showLoading('恢复中...');
+    try {
+        const response = await fetch(`${API_BASE}/share/${shareId}/restore`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${TokenManager.get()}` }
+        });
+        if (!response.ok) {
+            const result = await response.json();
+            alert(`恢复失败: ${result.error || '未知错误'}`);
+            return;
+        }
+        await loadMyShares();
+    } catch (error) {
+        alert(`恢复失败: ${error.message}`);
+    } finally {
+        hideLoading();
+    }
+}
+
+// 删除分享链接（本人单条流程保持不变）
 async function deleteShare(shareId) {
     if (!confirm('确定要删除此分享链接吗？删除后链接将立即失效。')) {
         return;
     }
-    
+
     showLoading('删除中...');
-    
+
     try {
         const response = await fetch(`${API_BASE}/share/${shareId}`, {
             method: 'DELETE',
@@ -599,9 +792,10 @@ async function deleteShare(shareId) {
                 'Authorization': `Bearer ${TokenManager.get()}`
             }
         });
-        
+
         if (response.ok) {
-            loadMyShares();
+            selectedShareIds.delete(shareId);
+            await loadMyShares();
         } else {
             const result = await response.json();
             alert(`删除失败: ${result.error || '未知错误'}`);

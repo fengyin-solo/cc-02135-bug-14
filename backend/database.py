@@ -51,10 +51,17 @@ def init_db():
             expires_at REAL,
             max_downloads INTEGER,
             download_count INTEGER DEFAULT 0,
+            is_disabled INTEGER NOT NULL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
         )
     ''')
+
+    # 兼容旧库：补充 is_disabled 字段（停用的分享不得出现在公开访问路径）
+    cursor.execute('PRAGMA table_info(share_links)')
+    columns = {row[1] for row in cursor.fetchall()}
+    if 'is_disabled' not in columns:
+        cursor.execute('ALTER TABLE share_links ADD COLUMN is_disabled INTEGER NOT NULL DEFAULT 0')
 
     default_users = [
         ('admin', hashlib.sha256('admin123'.encode()).hexdigest()),

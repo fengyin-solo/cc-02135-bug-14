@@ -51,6 +51,19 @@
         <!-- 我的分享 -->
         <div id="mySharesSection" class="file-list-section" style="display: none;">
             <h2>我的分享</h2>
+            <div id="shareBatchBar" class="share-batch-bar" hidden>
+                <label class="select-all-label">
+                    <input type="checkbox" id="selectAllShares">
+                    <span>全选</span>
+                </label>
+                <span id="selectedCount" class="selected-count">已选 0 项</span>
+                <div class="batch-actions">
+                    <button type="button" class="batch-btn" id="batchDisableBtn">批量停用</button>
+                    <button type="button" class="batch-btn" id="batchRestoreBtn">批量恢复</button>
+                    <button type="button" class="batch-btn batch-btn-danger" id="batchDeleteBtn">批量删除</button>
+                </div>
+            </div>
+            <div id="batchResult" class="batch-result" hidden></div>
             <div id="mySharesList" class="share-list"></div>
         </div>
 
